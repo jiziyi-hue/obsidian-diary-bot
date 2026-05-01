@@ -1,0 +1,23 @@
+name = "diary-bot-relay"
+main = "src/index.ts"
+compatibility_date = "2026-04-30"
+
+# KV namespaces — create with `wrangler kv:namespace create MESSAGES`
+# and `wrangler kv:namespace create BINDINGS`. Paste the printed IDs below.
+[[kv_namespaces]]
+binding = "MESSAGES"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+
+[[kv_namespaces]]
+binding = "BINDINGS"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+
+# D1 database — entities, mentions, topic_profiles, finalize_packets.
+# Run once:
+#   wrangler d1 create diary-bot-db
+#   wrangler d1 execute diary-bot-db --file=src/schema.sql --remote
+# Paste the printed database_id below.
+[[d1_databases]]
+binding = "DB"
+database_name = "diary-bot-db"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"

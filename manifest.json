@@ -1,0 +1,11 @@
+{
+  "id": "ai-diary-bot",
+  "name": "AI Diary Bot",
+  "version": "1.0.0",
+  "minAppVersion": "1.4.0",
+  "description": "Chat with AI on Telegram, auto-save reflections to your daily note.",
+  "author": "jiziyi-hue",
+  "authorUrl": "https://github.com/jiziyi-hue",
+  "fundingUrl": "",
+  "isDesktopOnly": false
+}
