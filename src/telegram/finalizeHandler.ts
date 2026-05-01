@@ -54,9 +54,13 @@ export async function handleFinalizePacket(plugin: DiaryBotPlugin, packet: Final
   collect(frontmatter.projects, 'project');
   await Promise.all(ensurePromises);
 
-  // Compose wrappedBody (mirrors legacy layout)
-  const now = new Date();
-  const stamp = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  // Compose wrappedBody (mirrors legacy layout). Prefer entry_ts (TG send time of
+  // first msg in session) so timestamps reflect when the user wrote, not when /save fired.
+  const entryTsRaw = (frontmatter as any).entry_ts;
+  const entryDate = (typeof entryTsRaw === 'number' && Number.isFinite(entryTsRaw))
+    ? new Date(entryTsRaw)
+    : new Date();
+  const stamp = `${pad(entryDate.getHours())}:${pad(entryDate.getMinutes())}`;
   const energyNum = frontmatter.energy || 5;
   const moodLabel = frontmatter.mood || 'journal';
   const moodEmoji = moodToEmoji(frontmatter.mood);
@@ -104,6 +108,7 @@ export async function handleFinalizePacket(plugin: DiaryBotPlugin, packet: Final
     frontmatter: fmForNote,
     body: wrappedBody,
     entities: allEntities,
+    date: entryDate,
   });
 }
 

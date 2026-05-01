@@ -75,6 +75,158 @@ interface TelegramUpdate {
 
 let webhookChecked = false;
 
+const SESSION_START_TTL = 86400;
+
+async function setSessionStartIfFirst(userId: string, msgDateSec: number, env: Env): Promise<void> {
+  const key = `session-start:${userId}`;
+  const existing = await env.MESSAGES.get(key);
+  if (existing) return;
+  await env.MESSAGES.put(key, String(msgDateSec), { expirationTtl: SESSION_START_TTL });
+}
+
+async function readSessionStartMs(userId: string, env: Env): Promise<number | null> {
+  const key = `session-start:${userId}`;
+  const raw = await env.MESSAGES.get(key);
+  if (!raw) return null;
+  const sec = parseInt(raw, 10);
+  return Number.isFinite(sec) ? sec * 1000 : null;
+}
+
+async function clearSessionStart(userId: string, env: Env): Promise<void> {
+  await env.MESSAGES.delete(`session-start:${userId}`);
+}
+
+async function runCloudSave(
+  userId: string,
+  chatId: string,
+  env: Env,
+  ctx: ExecutionContext
+): Promise<Response> {
+  const ctxRaw = await env.MESSAGES.get(`ctx:${userId}`);
+  const conversation: Array<{ role: 'user' | 'assistant'; content: string }> =
+    ctxRaw ? JSON.parse(ctxRaw) : [];
+  const photosKey = `pending-photos:${userId}`;
+  const photosRaw = await env.MESSAGES.get(photosKey);
+  const photoIdsPending: string[] = photosRaw ? JSON.parse(photosRaw) : [];
+  if (conversation.length === 0 && photoIdsPending.length === 0) {
+    await sendTelegramMessage(env.BOT_TOKEN, chatId, 'No conversation to save.');
+    return json({ ok: true });
+  }
+  if (conversation.length === 0 && photoIdsPending.length > 0) {
+    conversation.push({ role: 'user', content: `[Shared ${photoIdsPending.length} photo${photoIdsPending.length === 1 ? '' : 's'} without caption]` });
+  }
+  const prefRawDone = await env.MESSAGES.get(`pref:${userId}`);
+  const prefDone = prefRawDone ? JSON.parse(prefRawDone) : {};
+  const activeTopic: string | null = prefDone.activeTopic || null;
+  const topicProfile = activeTopic && activeTopic !== 'random'
+    ? (await getProfile(userId, activeTopic, env)).user_profile || null
+    : null;
+
+  await sendTelegramMessage(env.BOT_TOKEN, chatId, '🌙 Saving…');
+  const parsed = await summarizeConversation(conversation, topicProfile, env);
+  if (!parsed) {
+    await sendTelegramMessage(env.BOT_TOKEN, chatId, '⚠️ Save failed (AI unavailable). Try /done again or open Obsidian.');
+    return json({ ok: true });
+  }
+  if (activeTopic && Array.isArray(parsed.frontmatter.topics)) {
+    const lower = activeTopic.toLowerCase();
+    if (!parsed.frontmatter.topics.some((t: string) => String(t).toLowerCase() === lower)) {
+      parsed.frontmatter.topics.unshift(activeTopic);
+    }
+  } else if (activeTopic) {
+    parsed.frontmatter.topics = [activeTopic];
+  }
+
+  const startedAtMs = (await readSessionStartMs(userId, env)) ?? Date.now();
+  const startedAt = new Date(startedAtMs);
+  const dateStr = `${startedAt.getFullYear()}-${pad2(startedAt.getMonth() + 1)}-${pad2(startedAt.getDate())}`;
+  parsed.frontmatter.entry_ts = startedAtMs;
+
+  await persistFinalizePacket(userId, dateStr, activeTopic, parsed, conversation, photoIdsPending, env);
+  if (photoIdsPending.length > 0) {
+    await env.MESSAGES.delete(photosKey);
+  }
+
+  if (activeTopic && activeTopic !== 'random') {
+    const entrySummary = `mood: ${parsed.frontmatter.mood || 'n/a'} · ${parsed.body.replace(/\s+/g, ' ').slice(0, 400)}`;
+    const { shouldFlush } = await appendToBuffer(userId, activeTopic, entrySummary, env);
+    if (shouldFlush) {
+      ctx.waitUntil(flushProfile(userId, activeTopic, env));
+    }
+  }
+
+  await env.MESSAGES.delete(`ctx:${userId}`);
+  await clearSessionStart(userId, env);
+  if (prefDone) {
+    delete prefDone.activeTopic;
+    delete prefDone.topicChosenAt;
+    await env.MESSAGES.put(`pref:${userId}`, JSON.stringify(prefDone), { expirationTtl: 2592000 });
+  }
+
+  const tagsLine = Array.isArray(parsed.frontmatter.topics) && parsed.frontmatter.topics.length
+    ? `\nTags: ${parsed.frontmatter.topics.map((t: string) => `#${t}`).join(' ')}`
+    : '';
+  await sendTelegramMessage(env.BOT_TOKEN, chatId,
+    `✓ Saved.${tagsLine}\n\n_Open Obsidian when convenient. Send a new message anytime to start the next entry._`,
+    'Markdown'
+  );
+  return json({ ok: true });
+}
+
+function pad2(n: number): string {
+  return String(n).padStart(2, '0');
+}
+
+const IDLE_AUTOSAVE_MS = 30 * 60 * 1000;
+const AUTOSAVE_LOCK_TTL = 300;
+
+async function runIdleAutoSaveSweep(env: Env, ctx: ExecutionContext): Promise<void> {
+  const now = Date.now();
+  let cursor: string | undefined;
+  do {
+    const list = await env.MESSAGES.list({ prefix: 'session-start:', cursor });
+    for (const k of list.keys) {
+      const userId = k.name.slice('session-start:'.length);
+      if (!userId) continue;
+      try {
+        await maybeAutoSaveOne(userId, now, env, ctx);
+      } catch (e: any) {
+        console.error('[autosave] user failed', userId, e?.message || e);
+      }
+    }
+    cursor = list.list_complete ? undefined : list.cursor;
+  } while (cursor);
+}
+
+async function maybeAutoSaveOne(userId: string, now: number, env: Env, ctx: ExecutionContext): Promise<void> {
+  const prefRaw = await env.MESSAGES.get(`pref:${userId}`);
+  const pref = prefRaw ? JSON.parse(prefRaw) : {};
+  if (pref.idleAutoSaveMinutes === 0) return;
+  const thresholdMs = (pref.idleAutoSaveMinutes ? pref.idleAutoSaveMinutes * 60 * 1000 : IDLE_AUTOSAVE_MS);
+  const lastTs: number = pref.lastActivityTs || 0;
+  if (!lastTs) return;
+  if (now - lastTs < thresholdMs) return;
+
+  const lockKey = `auto-saving:${userId}`;
+  const lockExisting = await env.MESSAGES.get(lockKey);
+  if (lockExisting) return;
+  await env.MESSAGES.put(lockKey, '1', { expirationTtl: AUTOSAVE_LOCK_TTL });
+  try {
+    const ctxRaw = await env.MESSAGES.get(`ctx:${userId}`);
+    const conversation = ctxRaw ? JSON.parse(ctxRaw) : [];
+    const photosRaw = await env.MESSAGES.get(`pending-photos:${userId}`);
+    const photos = photosRaw ? JSON.parse(photosRaw) : [];
+    if ((!conversation || conversation.length === 0) && (!photos || photos.length === 0)) {
+      await clearSessionStart(userId, env);
+      return;
+    }
+    await sendTelegramMessage(env.BOT_TOKEN, userId, '🌙 Idle — auto-saving your entry…');
+    await runCloudSave(userId, userId, env, ctx);
+  } finally {
+    await env.MESSAGES.delete(lockKey);
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     // Auto-re-register webhook on cold start (once per instance)
@@ -249,6 +401,7 @@ export default {
       }
       await env.MESSAGES.delete(`ctx:${user_id}`);
       await env.MESSAGES.delete(`queue:${user_id}`);
+      await clearSessionStart(user_id, env);
       return json({ ok: true });
     }
 
@@ -421,6 +574,12 @@ export default {
     return json({ ok: true, message: 'AI Diary Bot Relay' });
   },
 
+  // Cron-triggered auto-save: scans active sessions and finalizes any that have
+  // been idle past the threshold, so a forgotten /save no longer loses an entry.
+  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    await runIdleAutoSaveSweep(env, ctx);
+  },
+
 };
 
 async function handleWebhook(update: TelegramUpdate, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -443,7 +602,7 @@ async function handleWebhook(update: TelegramUpdate, env: Env, ctx: ExecutionCon
 
     if (data === 'save') {
       await answerCallback(env.BOT_TOKEN, cq.id, 'Saving…');
-      await sendTelegramMessage(env.BOT_TOKEN, chatId, '📝 Open Obsidian to save your diary entry.');
+      return runCloudSave(userId, chatId, env, ctx);
     } else if (data === 'help') {
       await answerCallback(env.BOT_TOKEN, cq.id);
       await sendTelegramMessage(env.BOT_TOKEN, chatId, HELP_TEXT);
@@ -612,6 +771,7 @@ async function handleWebhook(update: TelegramUpdate, env: Env, ctx: ExecutionCon
     delete pref.topicChosenAt;
     await env.MESSAGES.put(prefKey, JSON.stringify(pref), { expirationTtl: 2592000 });
     await env.MESSAGES.delete(`ctx:${userId}`);
+    await clearSessionStart(userId, env);
     if (mode === 'silent') {
       await sendTelegramMessage(env.BOT_TOKEN, chatId, '🤫 Silent — record only, no AI');
     } else {
@@ -658,78 +818,13 @@ async function handleWebhook(update: TelegramUpdate, env: Env, ctx: ExecutionCon
   // Cloud-side /save (legacy /done): AI summarize → D1 finalize_packets + topic profile buffer.
   // Plugin's /pull picks up packet later and writes vault. User gets immediate "✓ Saved".
   if (text === '/save' || text === '/done') {
-    const ctxRaw = await env.MESSAGES.get(`ctx:${userId}`);
-    const conversation: Array<{ role: 'user' | 'assistant'; content: string }> =
-      ctxRaw ? JSON.parse(ctxRaw) : [];
-    const photosKey = `pending-photos:${userId}`;
-    const photosRaw = await env.MESSAGES.get(photosKey);
-    const photoIdsPending: string[] = photosRaw ? JSON.parse(photosRaw) : [];
-    if (conversation.length === 0 && photoIdsPending.length === 0) {
-      await sendTelegramMessage(env.BOT_TOKEN, chatId, 'No conversation to save.');
-      return json({ ok: true });
-    }
-    // Photo-only entry: synthesize minimal conversation so AI summarize has input.
-    if (conversation.length === 0 && photoIdsPending.length > 0) {
-      conversation.push({ role: 'user', content: `[Shared ${photoIdsPending.length} photo${photoIdsPending.length === 1 ? '' : 's'} without caption]` });
-    }
-    const prefRawDone = await env.MESSAGES.get(`pref:${userId}`);
-    const prefDone = prefRawDone ? JSON.parse(prefRawDone) : {};
-    const activeTopic: string | null = prefDone.activeTopic || null;
-    const topicProfile = activeTopic && activeTopic !== 'random'
-      ? (await getProfile(userId, activeTopic, env)).user_profile || null
-      : null;
-
-    await sendTelegramMessage(env.BOT_TOKEN, chatId, '🌙 Saving…');
-    const parsed = await summarizeConversation(conversation, topicProfile, env);
-    if (!parsed) {
-      await sendTelegramMessage(env.BOT_TOKEN, chatId, '⚠️ Save failed (AI unavailable). Try /done again or open Obsidian.');
-      return json({ ok: true });
-    }
-    // Inject topic into frontmatter.topics if not already present (canonical key).
-    if (activeTopic && Array.isArray(parsed.frontmatter.topics)) {
-      const lower = activeTopic.toLowerCase();
-      if (!parsed.frontmatter.topics.some((t: string) => String(t).toLowerCase() === lower)) {
-        parsed.frontmatter.topics.unshift(activeTopic);
-      }
-    } else if (activeTopic) {
-      parsed.frontmatter.topics = [activeTopic];
-    }
-
-    const today = new Date().toISOString().slice(0, 10);
-    await persistFinalizePacket(userId, today, activeTopic, parsed, conversation, photoIdsPending, env);
-    // Drain pending photos.
-    if (photoIdsPending.length > 0) {
-      await env.MESSAGES.delete(photosKey);
-    }
-
-    // Append to topic buffer + maybe schedule async flush.
-    if (activeTopic && activeTopic !== 'random') {
-      const entrySummary = `mood: ${parsed.frontmatter.mood || 'n/a'} · ${parsed.body.replace(/\s+/g, ' ').slice(0, 400)}`;
-      const { shouldFlush } = await appendToBuffer(userId, activeTopic, entrySummary, env);
-      if (shouldFlush) {
-        ctx.waitUntil(flushProfile(userId, activeTopic, env));
-      }
-    }
-
-    // Clear ctx so next session is fresh; reset activeTopic so user gets topic picker again.
-    await env.MESSAGES.delete(`ctx:${userId}`);
-    if (prefDone) {
-      delete prefDone.activeTopic;
-      delete prefDone.topicChosenAt;
-      await env.MESSAGES.put(`pref:${userId}`, JSON.stringify(prefDone), { expirationTtl: 2592000 });
-    }
-
-    const tagsLine = Array.isArray(parsed.frontmatter.topics) && parsed.frontmatter.topics.length
-      ? `\nTags: ${parsed.frontmatter.topics.map((t: string) => `#${t}`).join(' ')}`
-      : '';
-    await sendTelegramMessage(env.BOT_TOKEN, chatId,
-      `✓ Saved.${tagsLine}\n\n_Open Obsidian when convenient. Send a new message anytime to start the next entry._`,
-      'Markdown'
-    );
-    return json({ ok: true });
+    return runCloudSave(userId, chatId, env, ctx);
   }
   if (text === '/cancel') {
     await env.MESSAGES.delete(`queue:${userId}`);
+    await env.MESSAGES.delete(`ctx:${userId}`);
+    await env.MESSAGES.delete(`pending-photos:${userId}`);
+    await clearSessionStart(userId, env);
     await sendTelegramMessage(env.BOT_TOKEN, chatId, '✓ Current session discarded.');
     return json({ ok: true });
   }
@@ -779,9 +874,12 @@ async function handleWebhook(update: TelegramUpdate, env: Env, ctx: ExecutionCon
       delete pref0.activeTopic;
       delete pref0.topicChosenAt;
       await env.MESSAGES.delete(`ctx:${userId}`);
+      await clearSessionStart(userId, env);
     }
     pref0.lastActivityTs = Date.now();
     await env.MESSAGES.put(`pref:${userId}`, JSON.stringify(pref0), { expirationTtl: 2592000 });
+    // Mark session start on first user msg of a fresh session (no-op if already set).
+    await setSessionStartIfFirst(userId, msg.date, env);
     if (shouldPick && text && !text.startsWith('/') && pref0.replyMode !== 'silent') {
       // Stash the user msg in ctx so they don't have to retype after picking topic.
       const initialCtx = [{ role: 'user', content: text }];

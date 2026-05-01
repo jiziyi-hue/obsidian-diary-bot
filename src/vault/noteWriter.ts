@@ -8,6 +8,8 @@ export interface StructuredAppend {
   body: string;
   /** Bare entity names to wrap as [[wikilinks]] within `body`. */
   entities: string[];
+  /** Optional override for daily note's date — falls back to today. */
+  date?: Date;
 }
 
 export class NoteWriter {
@@ -36,9 +38,9 @@ export class NoteWriter {
     }
   }
 
-  public getDailyNotePath(): string {
+  public getDailyNotePath(date?: Date): string {
     const folder = this.plugin.settings.diaryFolder || 'Journal';
-    return diaryPath(folder, fmtDate(new Date()));
+    return diaryPath(folder, fmtDate(date ?? new Date()));
   }
 
   /**
@@ -47,20 +49,21 @@ export class NoteWriter {
    * the body to [[wikilinks]], then appends the body.
    */
   async appendStructured(input: StructuredAppend): Promise<void> {
-    const notePath = this.getDailyNotePath();
+    const dateStr = fmtDate(input.date ?? new Date());
+    const notePath = this.getDailyNotePath(input.date);
     const parentDir = notePath.substring(0, notePath.lastIndexOf('/'));
     await this.ensureFolderExists(parentDir);
     const wrappedBody = wrapEntities(input.body, input.entities);
 
     let file = this.app.vault.getAbstractFileByPath(notePath);
     if (!(file instanceof TFile)) {
-      const initialFm = stringifyYaml({ date: today(), tags: ['diary'] }).trimEnd();
-      const initial = `---\n${initialFm}\n---\n\n# ${today()}\n\n`;
+      const initialFm = stringifyYaml({ date: dateStr, tags: ['diary'] }).trimEnd();
+      const initial = `---\n${initialFm}\n---\n\n# ${dateStr}\n\n`;
       file = await this.app.vault.create(notePath, initial);
     }
 
     await this.app.fileManager.processFrontMatter(file as TFile, (fm) => {
-      mergeIntoFrontmatter(fm, input.frontmatter, today());
+      mergeIntoFrontmatter(fm, input.frontmatter, dateStr);
     });
 
     if (this.plugin.settings.appendMode) {

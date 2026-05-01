@@ -7,6 +7,8 @@ export interface DiarySession {
   followUpCount: number;
   startedAt: Date;
   lastActivityAt: Date;
+  /** TG send time of first user msg in session — used for diary timestamp/path. */
+  firstMsgAt?: Date;
   activeTags?: string[];
   activeEntities?: string[];
   silentReplyIndex?: number;
@@ -16,9 +18,10 @@ export interface DiarySession {
   activePlaceName?: string;
 }
 
-interface PersistedSession extends Omit<DiarySession, 'startedAt' | 'lastActivityAt'> {
+interface PersistedSession extends Omit<DiarySession, 'startedAt' | 'lastActivityAt' | 'firstMsgAt'> {
   startedAt: string;
   lastActivityAt: string;
+  firstMsgAt?: string;
 }
 
 export class SessionManager {
@@ -79,6 +82,7 @@ export class SessionManager {
           ...p,
           startedAt: new Date(p.startedAt),
           lastActivityAt: new Date(p.lastActivityAt),
+          firstMsgAt: p.firstMsgAt ? new Date(p.firstMsgAt) : undefined,
         });
       }
     } catch (e) {
@@ -93,6 +97,7 @@ export class SessionManager {
         ...s,
         startedAt: s.startedAt.toISOString(),
         lastActivityAt: s.lastActivityAt.toISOString(),
+        firstMsgAt: s.firstMsgAt ? s.firstMsgAt.toISOString() : undefined,
       }));
       await this.app.vault.adapter.write(this.path, JSON.stringify(data));
     } catch (e) {

@@ -2,6 +2,11 @@ name = "diary-bot-relay"
 main = "src/index.ts"
 compatibility_date = "2026-04-30"
 
+# Cron trigger: every 5 minutes scan active sessions and auto-save any idle past
+# the per-user threshold (default 30 min). See `runIdleAutoSaveSweep`.
+[triggers]
+crons = ["*/5 * * * *"]
+
 # KV namespaces — create with `wrangler kv:namespace create MESSAGES`
 # and `wrangler kv:namespace create BINDINGS`. Paste the printed IDs below.
 [[kv_namespaces]]

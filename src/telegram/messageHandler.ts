@@ -174,6 +174,12 @@ export class MessageHandler {
       session = this.plugin.sessionManager.createSession(userId, msgTime);
     }
 
+    // Track TG send time of the first user msg so the diary entry's timestamp +
+    // daily-note path reflect when the user wrote, not when /save fires.
+    if (!session.firstMsgAt && typeof msg.date === 'number') {
+      session.firstMsgAt = new Date(msg.date * 1000);
+    }
+
     // ── Worker is canonical AI replier. Worker stores running [user,assistant,...] ctx.
     //    On each worker_replied msg, REPLACE session.messages from latest ctx — that's
     //    the source of truth. Pushing user msg again here would duplicate it in vault.
@@ -372,8 +378,8 @@ export class MessageHandler {
       // Wait for all entity stub creations + alias merges in parallel.
       await Promise.all(ensurePromises);
 
-      const now = new Date();
-      const stamp = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+      const entryDate = session.firstMsgAt ?? session.startedAt ?? new Date();
+      const stamp = `${pad(entryDate.getHours())}:${pad(entryDate.getMinutes())}`;
 
       // Match both wikilink (![[...IMG_...]]) and markdown (![alt](...IMG_...)) forms
       const photos = session.messages
@@ -448,6 +454,7 @@ export class MessageHandler {
         frontmatter: fmForNote,
         body: wrappedBody,
         entities: allEntities,
+        date: entryDate,
       });
 
       const tagsLine = Array.isArray(frontmatter.topics) && frontmatter.topics.length
@@ -466,8 +473,8 @@ export class MessageHandler {
 
       // M3.4: push entities to worker D1 for people graph + smart reminders.
       this.plugin.relayClient.indexEntry(userId, {
-        date: fmtDate(new Date()),
-        path: this.plugin.noteWriter.getDailyNotePath(),
+        date: fmtDate(entryDate),
+        path: this.plugin.noteWriter.getDailyNotePath(entryDate),
         mood: frontmatter.mood,
         people: frontmatter.people || [],
         places: frontmatter.places || [],
