@@ -1,14 +1,24 @@
 # Obsidian Diary Bot
 
-> Chat with an AI companion on Telegram. Your reflections auto-save to your Obsidian vault — organized by topic, with an evolving user profile per life area.
+> An Obsidian plugin that turns journaling into a conversation. Chat with an AI companion from your phone; the plugin files each chat into your vault as a daily note, builds a profile of you per life area, and gives you a dashboard, timeline, photo wall and people graph.
+
+**中文简介：** 这是一个 Obsidian 插件 + 云端后端。在手机上和 AI 聊天，聊完自动整理成 Obsidian 日记，并按 8 个生活领域持续积累你的画像；插件自带仪表盘、时间线、照片墙和人物关系图。云端全部跑在 Cloudflare 免费额度内，零运营成本。
 
 Backend: a Cloudflare Worker (free tier, always-on). Frontend: an Obsidian plugin (writes to your vault, never touches your data after that).
+
+## Why I built it
+
+Most people stop journaling because a blank page is hard to face. Talking is easier than writing, so the entry point is a chat that asks a good question, reflects briefly and then gets out of the way. The conversation is saved into Obsidian as plain Markdown, so the notes stay yours and portable.
+
+The product is the **Obsidian plugin** (vault writer, profiles, views, memory) plus the Worker behind it. Telegram is only the current input channel, chosen because its Bot API is free, has no review process and supports photos and buttons. The Worker owns the conversation, and the plugin only pulls finished entries, so the capture channel is a thin layer on top.
+
+**Known limitation:** Telegram is not commonly used in mainland China and may need a network workaround there; `workers.dev` addresses can also be unreliable from some networks. Supporting a channel that is native to mainland users (for example a WeChat-based one) is the main open item.
 
 ---
 
 ## What it does
 
-- **Capture from anywhere** — Telegram is the input surface. Send text or photos from your phone, watch, browser, etc.
+- **Capture from anywhere** — Telegram is the current input channel. Send text or photos from your phone, watch, browser, etc.
 - **Topic-driven chat** — pick from 8 life areas (work / friends / family / love / self / goals / health / random) at the start of each session. Each topic accumulates a profile of *who you are in that area*.
 - **AI reflection** — quiet, varied responses (60% reflect+question, 25% pure empathy, 15% pattern observation). No clinical distance.
 - **Cloud-side AI** — the Worker handles AI even when Obsidian is closed. Your phone is always-on; your laptop doesn't need to be.
